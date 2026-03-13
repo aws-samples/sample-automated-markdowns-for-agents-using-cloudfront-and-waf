@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Automated Format Conversion for AI Agents - Amazon CloudFront + AWS WAF</title>
+  <meta name="description" content="Serve AI-agent-optimized content at the edge using Amazon CloudFront, AWS WAF Bot Control, and automatic HTML-to-markdown conversion.">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><a href="/">CloudFront AI Format Converter</a></div>
+    <nav>
+      <ul>
+        <li><a href="/" class="active">Home</a></li>
+        <li><a href="/blog/getting-started.html">Getting Started</a></li>
+        <li><a href="/docs/architecture.html">Architecture</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>Automated Format Conversion for AI Agents</h1>
+      <p class="tagline">Serve AI-agent-optimized content at the edge. Amazon CloudFront + AWS WAF detect AI bot requests that accept markdown and automatically convert HTML &mdash; with YAML frontmatter and metadata headers.</p>
+      <div class="cta-buttons">
+        <a href="/blog/getting-started.html" class="btn btn-primary">Get Started</a>
+        <a href="/docs/architecture.html" class="btn btn-secondary">Architecture</a>
+      </div>
+    </section>
+
+    <section>
+      <h2>The Problem</h2>
+      <p>AI coding agents (Claude, GPT, Copilot) increasingly crawl documentation sites to assist developers. These agents consume HTML pages but work far more effectively with clean markdown. Pre-generating every format for every page is wasteful. Most pages may never be requested by an AI agent.</p>
+      <blockquote>
+        <p><strong>Key Insight:</strong> Instead of pre-generating every possible content format, detect what's needed at the edge, serve the original, and asynchronously generate the optimized format. On the next request, serve it directly &mdash; with metadata that helps AI agents estimate context window usage.</p>
+      </blockquote>
+    </section>
+
+    <section>
+      <h2>How It Works</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th>Component</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>AWS WAF Bot Control V5</td>
+            <td>Detects AI bot <strong>and</strong> <code>Accept: text/markdown</code> header, injects <code>x-amzn-waf-format-convert-needed: markdown</code></td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>CloudFront Function + KVS</td>
+            <td>Checks KVS for existing format marker. If found, creates dynamic origin group and rewrites URI to <code>/formats/markdown/...</code></td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>Dynamic Origin Group</td>
+            <td>Tries Formats Amazon S3 bucket first. Falls back to Format-Missing Distribution (protected by origin-verify AWS WAF) on 403</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td>Generation Pipeline</td>
+            <td>CFF logs trigger async pipeline: SQS FIFO &rarr; Lambda (turndown + metadata extraction) &rarr; S3 + DynamoDB &rarr; KVS</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Four Request Paths</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Scenario</th>
+            <th>Flow</th>
+            <th>Latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Non-bot</strong> (browser)</td>
+            <td>AWS WAF &rarr; CFF (pass through) &rarr; Content S3 &rarr; 200</td>
+            <td>Direct, zero failover</td>
+          </tr>
+          <tr>
+            <td><strong>Bot, no KVS marker</strong></td>
+            <td>AWS WAF &rarr; CFF (logs <code>format_needed</code>) &rarr; Content S3 &rarr; 200</td>
+            <td>Direct, triggers async generation</td>
+          </tr>
+          <tr>
+            <td><strong>Bot, KVS hit + S3 exists</strong></td>
+            <td>AWS WAF &rarr; CFF (dynamic origin group + rewrite) &rarr; Formats S3 &rarr; 200</td>
+            <td>Direct, zero failover</td>
+          </tr>
+          <tr>
+            <td><strong>Bot, KVS hit + S3 missing</strong></td>
+            <td>AWS WAF &rarr; CFF (dynamic origin group + rewrite) &rarr; Formats S3 (403) &rarr; Format-Missing Distro &rarr; Content S3 &rarr; 200</td>
+            <td>One failover, triggers regeneration</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Key Design Decisions</h2>
+      <div class="features-grid">
+        <div class="feature">
+          <h3>Content Negotiation</h3>
+          <p>AWS WAF requires both AI bot detection <strong>and</strong> <code>Accept: text/markdown</code>. Only bots that explicitly request markdown trigger conversion. <code>Vary: Accept</code> ensures proper caching.</p>
+        </div>
+        <div class="feature">
+          <h3>Dynamic Origin Groups</h3>
+          <p>CFF uses <code>cf.createRequestOriginGroup()</code> to create per-request origin groups. No static origin group configuration needed &mdash; routing is entirely driven by KVS markers.</p>
+        </div>
+        <div class="feature">
+          <h3>DDB &rarr; KVS Sync</h3>
+          <p>DynamoDB as durable marker store, streamed to CloudFront KVS with <code>batchSize: 1</code> for strict ordering. No ETag concurrency issues.</p>
+        </div>
+        <div class="feature">
+          <h3>Metadata &amp; Frontmatter</h3>
+          <p>Generated markdown includes YAML frontmatter (title, description, token count) and S3 <code>x-amz-meta-*</code> headers for programmatic access by AI agents.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Quick Deploy</h2>
+      <pre><code class="language-bash">git clone https://github.com/aws-samples/sample-automated-markdowns-for-agents-using-cloudfront-and-waf.git
+cd sample-automated-markdowns-for-agents-using-cloudfront-and-waf
+npm install
+npx cdk deploy --profile your-profile</code></pre>
+      <p>The stack deploys to <code>us-east-1</code> (required for Amazon CloudFront AWS WAF). See the <a href="/blog/getting-started.html">Getting Started</a> guide for full deployment and testing instructions.</p>
+    </section>
+
+    <section>
+      <h2>Technology Stack</h2>
+      <ul>
+        <li><strong>AWS CDK v2</strong> &mdash; Infrastructure as Code (TypeScript)</li>
+        <li><strong>Amazon CloudFront</strong> &mdash; Content delivery with 2-distribution chain</li>
+        <li><strong>AWS WAF Bot Control V5</strong> &mdash; AI bot classification + Accept header matching</li>
+        <li><strong>CloudFront Functions</strong> &mdash; Sub-millisecond routing with dynamic origin groups</li>
+        <li><strong>CloudFront KeyValueStore</strong> &mdash; Edge-local marker lookups</li>
+        <li><strong>Lambda + SQS FIFO</strong> &mdash; Async format generation pipeline</li>
+        <li><strong>DynamoDB Streams</strong> &mdash; CDC to sync markers to KVS</li>
+        <li><strong>Turndown</strong> &mdash; HTML-to-markdown conversion with GFM support + metadata extraction</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>License</h2>
+      <p>This solution is released under the <a href="https://opensource.org/licenses/MIT-0" rel="noopener noreferrer">MIT-0 License</a>.</p>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-links">
+      <a href="/blog/getting-started.html">Getting Started</a>
+      <a href="/docs/architecture.html">Architecture</a>
+      <a href="https://github.com/aws-samples/sample-automated-markdowns-for-agents-using-cloudfront-and-waf" rel="noopener noreferrer">GitHub</a>
+    </div>
+    <p>Released under MIT-0 License.</p>
+  </footer>
+</body>
+</html>

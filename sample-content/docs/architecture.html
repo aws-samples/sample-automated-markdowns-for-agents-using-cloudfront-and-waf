@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture Reference - CloudFront AI Format Converter</title>
+  <meta name="description" content="Detailed component reference for the 2-distribution chain, dynamic origin groups, generation pipeline, metadata extraction, and sync flow.">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><a href="/">CloudFront AI Format Converter</a></div>
+    <nav>
+      <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/blog/getting-started.html">Getting Started</a></li>
+        <li><a href="/docs/architecture.html" class="active">Architecture</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <div class="breadcrumb">
+    <a href="/">Home</a> &rsaquo; <a href="/docs/architecture.html">Architecture</a>
+  </div>
+
+  <main>
+    <h1>Architecture Reference</h1>
+    <p class="meta">Detailed component reference for the 2-distribution chain, dynamic origin groups, generation pipeline, metadata flow, and sync architecture.</p>
+
+    <div class="toc">
+      <h4>Sections</h4>
+      <ul>
+        <li><a href="#edge-layer">Edge Layer (AWS WAF + CFF + KVS)</a></li>
+        <li><a href="#distribution-chain">2-Distribution Chain</a></li>
+        <li><a href="#generation-pipeline">Generation Pipeline</a></li>
+        <li><a href="#metadata-flow">Metadata &amp; Frontmatter</a></li>
+        <li><a href="#ddb-kvs-sync">DynamoDB &rarr; KVS Sync</a></li>
+        <li><a href="#cff-viewer-request">CFF: Viewer Request Logic</a></li>
+        <li><a href="#cff-format-missing">CFF: Format-Missing Logic</a></li>
+        <li><a href="#generator-lambda">Generator Lambda</a></li>
+        <li><a href="#configuration">Configuration Reference</a></li>
+      </ul>
+    </div>
+
+    <section id="edge-layer">
+      <h2>Edge Layer (AWS WAF + CFF + KVS)</h2>
+      <p>The edge layer handles bot classification, content negotiation, routing decisions, and signal emission &mdash; all at CloudFront edge locations with sub-millisecond latency. Built from modular CDK constructs: <code>BotControlWaf</code>, <code>RoutingFunctions</code>, <code>OriginVerifyWaf</code>, and <code>FormatMissingDistribution</code>.</p>
+
+      <h3>AWS WAF WebACL (Bot Control)</h3>
+      <p>A single WebACL with three rules, evaluated in priority order:</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Rule</th>
+            <th>Priority</th>
+            <th>Type</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>AWSBotControl</code></td>
+            <td>0</td>
+            <td>Managed Rule Group (Bot Control V5, COMMON)</td>
+            <td>Count (applies labels)</td>
+          </tr>
+          <tr>
+            <td><code>FormatConvertHeaderInjection</code></td>
+            <td>1</td>
+            <td>AND: Label Match (<code>bot:category:ai</code>) + ByteMatch (<code>Accept</code> contains <code>text/markdown</code>)</td>
+            <td>Count + inject <code>x-amzn-waf-format-convert-needed: markdown</code></td>
+          </tr>
+          <tr>
+            <td><code>DoNotConvert</code></td>
+            <td>2</td>
+            <td>Regex Pattern Set (URI match)</td>
+            <td>Count + inject <code>x-amzn-waf-no-convert: true</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <blockquote>
+        <p><strong>Content Negotiation:</strong> The <code>FormatConvertHeaderInjection</code> rule uses an AND statement &mdash; both the AI bot label <em>and</em> <code>Accept: text/markdown</code> must be present. This prevents unnecessary format generation for bots that don't explicitly request markdown (e.g., search crawlers).</p>
+      </blockquote>
+
+      <h3>AWS WAF WebACL (Origin Verify)</h3>
+      <p>A second WebACL protects the Format-Missing distribution from direct internet access. It defaults to <strong>Block</strong> and only allows requests containing a shared secret in the <code>x-origin-verify</code> header. This secret is generated at deploy time and injected as a custom origin header by the Primary distribution.</p>
+
+      <h3>CloudFront KeyValueStore (KVS)</h3>
+      <p>Stores URI &rarr; marker mappings for sub-millisecond lookups in the CFF. Markers are JSON objects:</p>
+      <pre><code class="language-json">{
+  "action": "rewrite",
+  "path": "/formats/markdown/blog/getting-started.html",
+  "format": "markdown",
+  "ttl": 1710000000,
+  "headers": {
+    "title": "Getting Started",
+    "tokens": "1234"
+  }
+}</code></pre>
+
+      <p>The <code>headers</code> field carries metadata extracted during generation, available for future CFF-level response header injection.</p>
+    </section>
+
+    <section id="distribution-chain">
+      <h2>2-Distribution Chain</h2>
+      <p>Two CloudFront distributions work together to handle all four request paths without Lambda@Edge:</p>
+
+      <h3>Primary Distribution</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Property</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>AWS WAF</td>
+            <td>Bot Control WebACL attached</td>
+          </tr>
+          <tr>
+            <td>CFF</td>
+            <td>Viewer Request &mdash; bot detection + KVS routing + dynamic origin groups</td>
+          </tr>
+          <tr>
+            <td>Default Origin</td>
+            <td>Content S3 (non-bot traffic goes here directly)</td>
+          </tr>
+          <tr>
+            <td><code>/static/*</code></td>
+            <td>Content S3 direct (no CFF, aggressive caching)</td>
+          </tr>
+          <tr>
+            <td>Response Headers</td>
+            <td><code>Vary: Accept</code> for content negotiation caching</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Format-Missing Distribution</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Property</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>AWS WAF</td>
+            <td>Origin-Verify WebACL (blocks all except requests with shared secret header)</td>
+          </tr>
+          <tr>
+            <td>CFF</td>
+            <td>Viewer Request &mdash; strips <code>/formats/&lt;format&gt;/</code> prefix, logs <code>object_missing</code></td>
+          </tr>
+          <tr>
+            <td>Default Origin</td>
+            <td>Content S3 (serves original HTML as fallback)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Why Two Distributions?</h3>
+      <p>The Primary CFF uses <code>cf.createRequestOriginGroup()</code> to dynamically create an origin group per request when a KVS marker is found. This routes bot requests to Formats S3 first, with automatic failover to the Format-Missing distribution on 403. Non-bot requests bypass this entirely and go directly to Content S3.</p>
+      <ol>
+        <li><strong>Non-bot:</strong> URI unchanged &rarr; Content S3 resolves immediately (zero failover)</li>
+        <li><strong>Bot with marker:</strong> CFF creates dynamic origin group &rarr; Formats S3 (200) or failover to Format-Missing Distro (strips prefix, serves original)</li>
+        <li><strong>Bot without marker:</strong> CFF logs <code>format_needed</code> &rarr; Content S3 (200), async pipeline generates format</li>
+      </ol>
+    </section>
+
+    <section id="generation-pipeline">
+      <h2>Generation Pipeline</h2>
+      <p>An asynchronous serverless pipeline that converts HTML to markdown on demand:</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Component</th>
+            <th>Role</th>
+            <th>Key Config</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CloudWatch Logs Subscription Filters</td>
+            <td>Route CFF log events matching <code>format_needed</code> or <code>object_missing</code></td>
+            <td>Attached to both CFF log groups</td>
+          </tr>
+          <tr>
+            <td>Parser Lambda</td>
+            <td>Decode base64+gzip CW log events, extract signals, send to SQS</td>
+            <td>Node.js 22, 30s timeout</td>
+          </tr>
+          <tr>
+            <td>SQS FIFO Queue</td>
+            <td>Deduplication and ordering</td>
+            <td><code>MessageDeduplicationId</code> = URI (explicit), 5-min dedup window</td>
+          </tr>
+          <tr>
+            <td>Generator Lambda</td>
+            <td>Fetch HTML via CloudFront, convert with turndown, extract metadata, add frontmatter, write S3 + DynamoDB</td>
+            <td><code>NodejsFunction</code>, 512MB, 2min timeout, esbuild bundles turndown</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Generator Lambda Details</h3>
+      <p>The Generator Lambda uses <a href="https://github.com/mixmark-io/turndown" rel="noopener noreferrer">turndown</a> with the GFM plugin for high-quality HTML-to-markdown conversion:</p>
+      <pre><code class="language-typescript">import TurndownService from 'turndown';
+import { gfm } from 'turndown-plugin-gfm';
+
+const turndown = new TurndownService({
+  headingStyle: 'atx',
+  codeBlockStyle: 'fenced',
+});
+turndown.use(gfm);</code></pre>
+
+      <p>The Lambda fetches HTML through the Primary CloudFront distribution (not S3 directly) using an <code>x-internal-skip-conversion</code> header to bypass CFF routing. This benefits from CloudFront edge caching.</p>
+
+      <h3>Environment Variables</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Variable</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>BUCKET_NAME</code></td>
+            <td>Formats S3 bucket for writing generated output</td>
+          </tr>
+          <tr>
+            <td><code>DISTRIBUTION_DOMAIN</code></td>
+            <td>Primary CloudFront domain for fetching source HTML</td>
+          </tr>
+          <tr>
+            <td><code>TABLE_NAME</code></td>
+            <td>DynamoDB markers table name</td>
+          </tr>
+          <tr>
+            <td><code>FORMAT_TTL_SECONDS</code></td>
+            <td>Marker TTL (default: 86400 = 24 hours)</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="metadata-flow">
+      <h2>Metadata &amp; Frontmatter</h2>
+      <p>The Generator Lambda extracts metadata from the source HTML and propagates it through the entire system:</p>
+
+      <h3>Extraction</h3>
+      <p>Metadata is parsed from HTML <code>&lt;head&gt;</code> elements:</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Field</th>
+            <th>Source</th>
+            <th>Example</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>title</code></td>
+            <td><code>&lt;title&gt;</code> tag</td>
+            <td>Getting Started - CloudFront AI Format Converter</td>
+          </tr>
+          <tr>
+            <td><code>description</code></td>
+            <td><code>&lt;meta name="description"&gt;</code></td>
+            <td>Deploy and test the solution...</td>
+          </tr>
+          <tr>
+            <td><code>image</code></td>
+            <td><code>&lt;meta property="og:image"&gt;</code></td>
+            <td>https://example.com/img.png</td>
+          </tr>
+          <tr>
+            <td><code>source_url</code></td>
+            <td><code>&lt;link rel="canonical"&gt;</code></td>
+            <td>https://example.com/docs/intro</td>
+          </tr>
+          <tr>
+            <td><code>tokens</code></td>
+            <td>Computed (word count &times; 1.3)</td>
+            <td>1234</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Propagation</h3>
+      <ol>
+        <li><strong>YAML Frontmatter:</strong> Prepended to the markdown content between <code>---</code> delimiters</li>
+        <li><strong>S3 Object Metadata:</strong> Stored as <code>x-amz-meta-*</code> headers on the S3 object, returned in HTTP responses</li>
+        <li><strong>DynamoDB Marker:</strong> Serialized as JSON in the <code>headers</code> field, synced to KVS for future CFF use</li>
+      </ol>
+
+      <h3>Example Response</h3>
+      <pre><code class="language-http">HTTP/2 200
+content-type: text/markdown; charset=utf-8
+x-amz-meta-title: Getting Started
+x-amz-meta-description: Deploy and test the solution
+x-amz-meta-tokens: 1234
+vary: Accept
+
+---
+title: Getting Started
+description: Deploy and test the solution
+tokens: 1234
+---
+
+# Getting Started
+...</code></pre>
+    </section>
+
+    <section id="ddb-kvs-sync">
+      <h2>DynamoDB &rarr; KVS Sync</h2>
+      <p>Instead of writing to KVS directly from the Generator Lambda (which suffers from ETag concurrency issues), markers flow through DynamoDB:</p>
+      <ol>
+        <li><strong>Generator Lambda</strong> writes marker to DynamoDB (no concurrency issues), including metadata in the <code>headers</code> field</li>
+        <li><strong>DynamoDB Stream</strong> captures the change event</li>
+        <li><strong>KVS Sync Lambda</strong> (<code>batchSize: 1</code>) reads the stream, calls <code>DescribeKeyValueStore</code> for current ETag, then <code>PutKey</code> with the full marker (including headers)</li>
+      </ol>
+
+      <p>The <code>batchSize: 1</code> setting guarantees strict sequential processing &mdash; no concurrent ETag conflicts. This follows the CDC (Change Data Capture) pattern.</p>
+
+      <h3>Cleanup on TTL Expiry</h3>
+      <p>When DynamoDB removes a marker via TTL, the KVS Sync Lambda also:</p>
+      <ul>
+        <li>Deletes the KVS key (so CFF stops routing to the stale format)</li>
+        <li>Deletes the format file from the Formats S3 bucket</li>
+      </ul>
+
+      <h3>DynamoDB Table Schema</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Attribute</th>
+            <th>Type</th>
+            <th>Role</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>uri</code></td>
+            <td>String (Partition Key)</td>
+            <td>Original request URI (e.g., <code>/blog/getting-started.html</code>)</td>
+          </tr>
+          <tr>
+            <td><code>action</code></td>
+            <td>String</td>
+            <td><code>rewrite</code></td>
+          </tr>
+          <tr>
+            <td><code>path</code></td>
+            <td>String</td>
+            <td>Rewritten URI path in Formats S3</td>
+          </tr>
+          <tr>
+            <td><code>format</code></td>
+            <td>String</td>
+            <td>Target format (e.g., <code>markdown</code>)</td>
+          </tr>
+          <tr>
+            <td><code>headers</code></td>
+            <td>String (JSON)</td>
+            <td>Serialized metadata (title, description, tokens)</td>
+          </tr>
+          <tr>
+            <td><code>ttl</code></td>
+            <td>Number</td>
+            <td>Unix timestamp for automatic expiry</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="cff-viewer-request">
+      <h2>CFF: Viewer Request Logic</h2>
+      <p>The primary CloudFront Function runs on every viewer request and makes routing decisions in this order:</p>
+      <ol>
+        <li>If <code>x-internal-skip-conversion</code> header present &rarr; pass through (Generator Lambda fetching HTML)</li>
+        <li>If <code>x-amzn-waf-no-convert</code> header present &rarr; pass through (do-not-convert path)</li>
+        <li>If <code>x-amzn-waf-format-convert-needed</code> header absent &rarr; pass through (not an AI bot requesting markdown)</li>
+        <li>AI bot with markdown Accept detected &rarr; read <code>format</code> from header value &rarr; KVS lookup:
+          <ul>
+            <li><strong>Marker found, valid TTL:</strong> Create dynamic origin group via <code>cf.createRequestOriginGroup()</code>, rewrite URI to <code>marker.path</code>, log <code>format_served</code></li>
+            <li><strong>Marker found, expired TTL:</strong> Pass through, log <code>format_needed</code> (triggers regeneration)</li>
+            <li><strong>No marker:</strong> Pass through, log <code>format_needed</code> (triggers first-time generation)</li>
+          </ul>
+        </li>
+      </ol>
+
+      <p>Constants like header names, origin IDs, and signal names are injected at CDK synth time via <code>{{PLACEHOLDER}}</code> template substitution &mdash; the CFF code itself is generic and reusable.</p>
+    </section>
+
+    <section id="cff-format-missing">
+      <h2>CFF: Format-Missing Logic</h2>
+      <p>The Format-Missing CFF runs on the second distribution (protected by the origin-verify AWS WAF). It handles requests that failed over from the dynamic origin group:</p>
+      <ol>
+        <li>Match URI against <code>/formats/&lt;format&gt;/</code> pattern</li>
+        <li>Extract format name and original path</li>
+        <li>Strip the <code>/formats/&lt;format&gt;/</code> prefix from URI</li>
+        <li>Log <code>object_missing</code> signal with format and original URI</li>
+        <li>Serve original content from Content S3</li>
+      </ol>
+    </section>
+
+    <section id="generator-lambda">
+      <h2>Generator Lambda</h2>
+      <p>The Generator Lambda is packaged using CDK's <code>NodejsFunction</code> which automatically bundles <code>turndown</code> and <code>turndown-plugin-gfm</code> via esbuild &mdash; no Docker or Lambda Layers required.</p>
+
+      <h3>Conversion Flow</h3>
+      <ol>
+        <li>Receive SQS message with <code>uri</code> and <code>format</code></li>
+        <li>Fetch HTML from <code>https://{DISTRIBUTION_DOMAIN}{uri}</code> with <code>x-internal-skip-conversion</code> header</li>
+        <li>Extract metadata from HTML <code>&lt;head&gt;</code> (title, description, og:image, canonical URL)</li>
+        <li>Convert HTML body to markdown using turndown (ATX headings, fenced code blocks, GFM tables)</li>
+        <li>Prepend YAML frontmatter with metadata + computed token count</li>
+        <li>Write markdown to Formats S3 at <code>formats/{format}{uri}</code> with <code>Content-Type: text/markdown; charset=utf-8</code> and metadata as S3 object metadata</li>
+        <li>Write marker to DynamoDB with TTL = now + <code>FORMAT_TTL_SECONDS</code>, including <code>headers</code> field with serialized metadata</li>
+      </ol>
+
+      <h3>Turndown Configuration</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Option</th>
+            <th>Value</th>
+            <th>Effect</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>headingStyle</code></td>
+            <td><code>atx</code></td>
+            <td>Uses <code># Heading</code> style (not underline)</td>
+          </tr>
+          <tr>
+            <td><code>codeBlockStyle</code></td>
+            <td><code>fenced</code></td>
+            <td>Uses triple-backtick code blocks</td>
+          </tr>
+          <tr>
+            <td>GFM Plugin</td>
+            <td>Enabled</td>
+            <td>Tables, strikethrough, task lists</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="configuration">
+      <h2>Configuration Reference</h2>
+
+      <h3>Stack-Level Settings</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Setting</th>
+            <th>Location</th>
+            <th>Default</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Region</td>
+            <td><code>bin/app.ts</code></td>
+            <td><code>us-east-1</code></td>
+            <td>Required for Amazon CloudFront AWS WAF</td>
+          </tr>
+          <tr>
+            <td>Format TTL</td>
+            <td><code>lib/constants.ts</code></td>
+            <td><code>86400</code> (24h)</td>
+            <td>How long generated formats remain valid</td>
+          </tr>
+          <tr>
+            <td>Bot Control Level</td>
+            <td><code>lib/constants.ts</code></td>
+            <td><code>COMMON</code></td>
+            <td><code>COMMON</code> or <code>TARGETED</code> inspection</td>
+          </tr>
+          <tr>
+            <td>Accept Header Match</td>
+            <td><code>lib/constants.ts</code></td>
+            <td><code>text/markdown</code></td>
+            <td>Value searched in Accept header (CONTAINS match)</td>
+          </tr>
+          <tr>
+            <td>Do-Not-Convert Patterns</td>
+            <td>AWS WAF Regex Pattern Set</td>
+            <td><code>/static/.*</code></td>
+            <td>URI patterns excluded from conversion</td>
+          </tr>
+          <tr>
+            <td>Target Format</td>
+            <td>AWS WAF header value</td>
+            <td><code>markdown</code></td>
+            <td>Format name injected by AWS WAF, drives CFF routing and generation</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Modular Constructs</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Construct</th>
+            <th>File</th>
+            <th>Responsibility</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>BotControlWaf</code></td>
+            <td><code>lib/constructs/edge/bot-control-waf.ts</code></td>
+            <td>Bot detection + Accept header matching + do-not-convert rules</td>
+          </tr>
+          <tr>
+            <td><code>RoutingFunctions</code></td>
+            <td><code>lib/constructs/edge/routing-functions.ts</code></td>
+            <td>KVS + primary CFF + failover CFF + log groups</td>
+          </tr>
+          <tr>
+            <td><code>OriginVerifyWaf</code></td>
+            <td><code>lib/constructs/edge/origin-verify-waf.ts</code></td>
+            <td>Shared secret AWS WAF for Format-Missing distro</td>
+          </tr>
+          <tr>
+            <td><code>FormatMissingDistribution</code></td>
+            <td><code>lib/constructs/edge/format-missing-distribution.ts</code></td>
+            <td>Secondary distro with prefix stripping + origin verification</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-links">
+      <a href="/">Home</a>
+      <a href="/blog/getting-started.html">Getting Started</a>
+      <a href="https://github.com/aws-samples/sample-automated-markdowns-for-agents-using-cloudfront-and-waf" rel="noopener noreferrer">GitHub</a>
+    </div>
+    <p>Released under MIT-0 License.</p>
+  </footer>
+</body>
+</html>

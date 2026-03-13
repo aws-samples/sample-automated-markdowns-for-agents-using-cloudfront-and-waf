@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started - Amazon CloudFront AI Format Converter</title>
+  <meta name="description" content="Deploy and test the automated format conversion solution for AI agents in under 15 minutes.">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><a href="/">CloudFront AI Format Converter</a></div>
+    <nav>
+      <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/blog/getting-started.html" class="active">Getting Started</a></li>
+        <li><a href="/docs/architecture.html">Architecture</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <div class="breadcrumb">
+    <a href="/">Home</a> &rsaquo; <a href="/blog/getting-started.html">Getting Started</a>
+  </div>
+
+  <main>
+    <article>
+      <h1>Getting Started</h1>
+      <p class="meta">Deploy and test the automated format conversion solution in under 15 minutes.</p>
+
+      <div class="toc">
+        <h4>On this page</h4>
+        <ul>
+          <li><a href="#prerequisites">Prerequisites</a></li>
+          <li><a href="#deploy">Deploy the Stack</a></li>
+          <li><a href="#test-non-bot">Test: Non-Bot Request</a></li>
+          <li><a href="#test-bot">Test: AI Bot Request</a></li>
+          <li><a href="#verify-pipeline">Verify the Generation Pipeline</a></li>
+          <li><a href="#test-markdown">Test: Markdown Response</a></li>
+          <li><a href="#do-not-convert">Configure Do-Not-Convert Paths</a></li>
+          <li><a href="#cleanup">Clean Up</a></li>
+        </ul>
+      </div>
+
+      <h2 id="prerequisites">Prerequisites</h2>
+      <ul>
+        <li>AWS account with <a href="https://docs.aws.amazon.com/cdk/v2/guide/bootstrapping.html" rel="noopener noreferrer">AWS Cloud Development Kit (AWS CDK) bootstrapped</a> in <code>us-east-1</code></li>
+        <li>Node.js 18 or later</li>
+        <li>AWS Command Line Interface (AWS CLI) configured with a profile that has admin access to the target account</li>
+        <li>Basic familiarity with Amazon CloudFront and AWS CDK (recommended but not required)</li>
+      </ul>
+
+      <blockquote>
+        <p><strong>Note:</strong> The entire stack deploys to <code>us-east-1</code> because AWS WAF WebACLs for Amazon CloudFront must be created in that region. A single-region stack avoids cross-region complexity.</p>
+      </blockquote>
+
+      <h2 id="deploy">Deploy the Stack</h2>
+      <p>Clone the repository and deploy:</p>
+      <pre><code class="language-bash">git clone https://github.com/aws-samples/sample-automated-markdowns-for-agents-using-cloudfront-and-waf.git
+cd sample-automated-markdowns-for-agents-using-cloudfront-and-waf
+
+# Install dependencies
+npm install
+
+# Preview what will be created
+npx cdk diff --profile your-profile
+
+# Deploy (takes ~5 minutes for CloudFront distributions)
+npx cdk deploy --profile your-profile</code></pre>
+
+      <p>After deployment, AWS CDK outputs the CloudFront distribution domain:</p>
+      <pre><code class="language-bash">Outputs:
+MarkdownGenerationStack.DistributionDomainName = d1234abcdef.cloudfront.net
+MarkdownGenerationStack.ContentBucketName = markdowngenerationstack-content-xxxxx
+MarkdownGenerationStack.FormatsBucketName = markdowngenerationstack-formats-xxxxx</code></pre>
+
+      <p>Save the distribution domain for testing:</p>
+      <pre><code class="language-bash">export CF_DOMAIN="d1234abcdef.cloudfront.net"</code></pre>
+
+      <h2 id="test-non-bot">Test: Non-Bot Request</h2>
+      <p>A regular browser request should return the original HTML content directly from the Content Amazon Simple Storage Service (Amazon S3) bucket. No failover, no format conversion.</p>
+      <pre><code class="language-bash"># Returns HTML (your browser User-Agent is not classified as AI bot)
+curl -s "https://$CF_DOMAIN/index.html" | head -5</code></pre>
+
+      <p>Expected output:</p>
+      <pre><code class="language-html">&lt;!DOCTYPE html&gt;
+&lt;html lang="en"&gt;
+&lt;head&gt;
+  &lt;meta charset="UTF-8"&gt;
+  &lt;meta name="viewport" ...</code></pre>
+
+      <h2 id="test-bot">Test: AI Bot Request</h2>
+      <p>AWS WAF Bot Control V5 classifies requests based on its own intelligence. Format conversion requires <strong>both</strong> an AI bot User-Agent <strong>and</strong> an <code>Accept</code> header that includes <code>text/markdown</code>:</p>
+      <pre><code class="language-bash"># First request: AWS WAF detects AI bot + Accept: text/markdown
+# Injects x-amzn-waf-format-convert-needed header
+# Returns original HTML (format hasn't been generated yet)
+curl -s -H "User-Agent: GPTBot/1.0" -H "Accept: text/markdown, text/html" \
+  "https://$CF_DOMAIN/blog/getting-started.html" | head -5</code></pre>
+
+      <p>On the first request, the Amazon CloudFront Function:</p>
+      <ol>
+        <li>Reads the <code>x-amzn-waf-format-convert-needed</code> header (value: <code>markdown</code>)</li>
+        <li>Looks up the URI in KVS &mdash; no marker found</li>
+        <li>Logs a <code>format_needed</code> signal via <code>console.log()</code></li>
+        <li>Serves the original HTML content from Content S3</li>
+      </ol>
+
+      <blockquote>
+        <p><strong>Why Accept header?</strong> Not all AI bots need markdown. The <code>Accept: text/markdown</code> requirement ensures only bots that explicitly request it trigger conversion &mdash; preventing unnecessary generation for search crawlers or bots that prefer HTML.</p>
+      </blockquote>
+
+      <h2 id="verify-pipeline">Verify the Generation Pipeline</h2>
+      <p>The <code>format_needed</code> signal triggers the async generation pipeline. Monitor it through CloudWatch:</p>
+
+      <h3>Check CFF Logs</h3>
+      <pre><code class="language-bash"># View format_needed signals from the primary CFF
+aws logs filter-log-events \
+  --log-group-name "/aws/cloudfront/function/viewer-request-MarkdownGeneration..." \
+  --filter-pattern "format_needed" \
+  --profile your-profile</code></pre>
+
+      <h3>Check SQS Queue</h3>
+      <pre><code class="language-bash"># Messages should appear briefly then be consumed by the Generator Lambda
+aws sqs get-queue-attributes \
+  --queue-url "https://sqs.us-east-1.amazonaws.com/ACCOUNT/MarkdownGeneration...fifo" \
+  --attribute-names ApproximateNumberOfMessages \
+  --profile your-profile</code></pre>
+
+      <h3>Check Generator Lambda Logs</h3>
+      <pre><code class="language-bash"># Look for successful conversion entries
+aws logs filter-log-events \
+  --log-group-name "/aws/lambda/MarkdownGenerationStack-GeneratorFunction..." \
+  --filter-pattern "GenerationSuccess" \
+  --profile your-profile</code></pre>
+
+      <h3>Verify Formats S3 Bucket</h3>
+      <pre><code class="language-bash"># Generated markdown should appear under formats/markdown/
+aws s3 ls "s3://$FORMATS_BUCKET/formats/markdown/" --recursive --profile your-profile</code></pre>
+
+      <h3>Verify DynamoDB Marker</h3>
+      <pre><code class="language-bash"># Marker should exist with action=rewrite
+aws dynamodb scan \
+  --table-name "MarkdownGenerationStack-MarkersTable..." \
+  --profile your-profile</code></pre>
+
+      <h2 id="test-markdown">Test: Markdown Response</h2>
+      <p>After ~30 seconds (pipeline processing + KVS sync), repeat the AI bot request:</p>
+      <pre><code class="language-bash"># Second request: KVS marker exists, CFF creates dynamic origin group and rewrites URI
+# Returns generated markdown with frontmatter instead of HTML
+curl -s -D - -H "User-Agent: GPTBot/1.0" -H "Accept: text/markdown, text/html" \
+  "https://$CF_DOMAIN/blog/getting-started.html"</code></pre>
+
+      <p>Expected response headers and body:</p>
+      <pre><code class="language-http">HTTP/2 200
+content-type: text/markdown; charset=utf-8
+x-amz-meta-title: Getting Started - CloudFront AI Format Converter
+x-amz-meta-tokens: 1234
+vary: Accept
+
+---
+title: Getting Started - CloudFront AI Format Converter
+description: Deploy and test the automated format conversion solution...
+tokens: 1234
+---
+
+# Getting Started
+
+Deploy and test the automated format conversion solution in under 15 minutes.
+
+## Prerequisites
+
+- AWS account with CDK bootstrapped in us-east-1
+- Node.js 18 or later
+...</code></pre>
+
+      <h3>What Happened</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th>Component</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>AWS WAF</td>
+            <td>Detected AI bot + <code>Accept: text/markdown</code>, injected <code>x-amzn-waf-format-convert-needed: markdown</code></td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>CFF</td>
+            <td>Found KVS marker, created dynamic origin group via <code>cf.createRequestOriginGroup()</code>, rewrote URI to <code>/formats/markdown/blog/getting-started.html</code></td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>Formats S3</td>
+            <td>Served markdown content with <code>Content-Type: text/markdown; charset=utf-8</code> and metadata headers</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="do-not-convert">Configure Do-Not-Convert Paths</h2>
+      <p>Some paths should never be converted (static assets, admin pages). These are managed via an AWS WAF Regex Pattern Set &mdash; no code changes needed:</p>
+
+      <pre><code class="language-bash"># View current patterns
+aws wafv2 list-regex-pattern-sets --scope CLOUDFRONT --profile your-profile
+
+# Update patterns (add /admin/* exclusion)
+aws wafv2 update-regex-pattern-set \
+  --name DoNotConvertPatterns \
+  --scope CLOUDFRONT \
+  --id "PATTERN_SET_ID" \
+  --lock-token "LOCK_TOKEN" \
+  --regular-expression-list \
+    RegexString='/static/.*' \
+    RegexString='/admin/.*' \
+  --profile your-profile</code></pre>
+
+      <p>The default deployment excludes <code>/static/*</code> paths. When a request matches these patterns, AWS WAF injects a <code>x-amzn-waf-no-convert</code> header, and the CFF passes the request through without any KVS lookup or URI rewriting.</p>
+
+      <h2 id="cleanup">Clean Up</h2>
+      <p>Remove all deployed resources:</p>
+      <pre><code class="language-bash">npx cdk destroy --profile your-profile</code></pre>
+
+      <p>This deletes both Amazon S3 buckets (content + formats), all CloudFront distributions, AWS WAF WebACLs, Amazon DynamoDB table, AWS Lambda functions, and Amazon SQS queues. The <code>removalPolicy: DESTROY</code> setting ensures clean teardown.</p>
+    </article>
+  </main>
+
+  <footer>
+    <div class="footer-links">
+      <a href="/">Home</a>
+      <a href="/docs/architecture.html">Architecture</a>
+      <a href="https://github.com/aws-samples/sample-automated-markdowns-for-agents-using-cloudfront-and-waf" rel="noopener noreferrer">GitHub</a>
+    </div>
+    <p>Released under MIT-0 License.</p>
+  </footer>
+</body>
+</html>
