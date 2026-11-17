@@ -13,6 +13,12 @@ const stack = new MarkdownGenerationStack(app, 'MarkdownGenerationStack', {
   description: STACK_DESCRIPTION,
 });
 
+// --- Optional tags from context, e.g. cdk.json or ~/.cdk.json: {"context": {"tags": {"team": "edge"}}} ---
+const tags: Record<string, string> = app.node.tryGetContext('tags') ?? {};
+for (const [key, value] of Object.entries(tags)) {
+  cdk.Tags.of(app).add(key, String(value));
+}
+
 // --- CDK Nag: AWS Solutions compliance checks ---
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 
@@ -47,7 +53,7 @@ NagSuppressions.addStackSuppressions(stack, [
   },
   {
     id: 'AwsSolutions-IAM5',
-    reason: 'Wildcard permissions are scoped to specific S3 buckets and are required by CDK L2 grant methods (grantReadWrite, grantRead). Resource::* is used for CloudFront invalidation which requires it.',
+    reason: 'Wildcard permissions are scoped to specific S3 buckets and are required by CDK L2 grant methods (grantReadWrite, grantRead) and the CDK asset copy for the Web Function code.',
     appliesTo: [
       'Action::s3:Abort*',
       'Action::s3:DeleteObject*',
@@ -58,6 +64,8 @@ NagSuppressions.addStackSuppressions(stack, [
       'Resource::<OriginLayerFormatsBucket4E44203B.Arn>/*',
       'Resource::<OriginLayerContentBucketED4C2888.Arn>/*',
       'Resource::arn:<AWS::Partition>:s3:::cdk-hnb659fds-assets-<AWS::AccountId>-us-east-1/*',
+      // The CDK-managed copy of the signal Web Function's code package into its asset bucket
+      'Resource::<AWSCDKWebFunctionAssetBucket5B596593.Arn>/web-function/*',
     ],
   },
   {
