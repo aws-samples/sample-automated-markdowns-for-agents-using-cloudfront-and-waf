@@ -19,7 +19,8 @@ describe('MarkdownGenerationStack', () => {
       UpdateReplacePolicy: 'Delete',
       DeletionPolicy: 'Delete',
     });
-    expect(Object.keys(buckets).length).toBe(2);
+    // The CDK-managed Web Function asset bucket is not ours to count
+    expect(Object.keys(buckets).filter((id) => id.startsWith('OriginLayer')).length).toBe(2);
   });
 
   // --- WAF WebACL ---
@@ -105,9 +106,94 @@ describe('MarkdownGenerationStack', () => {
   });
 
   // --- CloudFront ---
-  test('creates CloudFront distributions', () => {
-    // Primary + Formats = 2 distributions
-    template.resourceCountIs('AWS::CloudFront::Distribution', 2);
+  test('creates one CloudFront distribution (no format-missing distribution)', () => {
+    template.resourceCountIs('AWS::CloudFront::Distribution', 1);
+    // Only the Bot Control web ACL: the origin-verify web ACL went with the second distribution
+    template.resourceCountIs('AWS::WAFv2::WebACL', 1);
+  });
+
+  test('distribution has the content, formats and signal origins', () => {
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        Origins: Match.arrayWith([
+          Match.objectLike({ Id: 'content' }),
+          Match.objectLike({ Id: 'formats-markdown', OriginPath: '/formats/markdown' }),
+          Match.objectLike({ Id: 'signal', DomainName: { 'Fn::GetAtt': [Match.stringLikeRegexp('SignalFunctionEndpoint'), 'DomainName'] } }),
+        ]),
+      }),
+    });
+  });
+
+  test('no cache behavior reaches the formats or signal origins directly', () => {
+    const [dist] = Object.values(template.findResources('AWS::CloudFront::Distribution'));
+    const config = dist.Properties.DistributionConfig;
+    const targets = [config.DefaultCacheBehavior, ...(config.CacheBehaviors ?? [])].map((b: any) => b.TargetOriginId);
+    expect(new Set(targets)).toEqual(new Set(['content']));
+  });
+
+  test('default behavior runs a viewer-request and a viewer-response function', () => {
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        DefaultCacheBehavior: Match.objectLike({
+          FunctionAssociations: [
+            Match.objectLike({ EventType: 'viewer-request' }),
+            Match.objectLike({ EventType: 'viewer-response' }),
+          ],
+        }),
+      }),
+    });
+  });
+
+  test('format-aware cache policy keys on the WAF header and the format version', () => {
+    template.hasResourceProperties('AWS::CloudFront::CachePolicy', {
+      CachePolicyConfig: Match.objectLike({
+        ParametersInCacheKeyAndForwardedToOrigin: Match.objectLike({
+          HeadersConfig: {
+            HeaderBehavior: 'whitelist',
+            Headers: ['x-amzn-waf-format-convert-needed', 'x-format-version'],
+          },
+        }),
+      }),
+    });
+  });
+
+  // --- Signal Web Function (cf.beacon target) ---
+  test('signal origin is a Lambda Web Function with an IamAuth endpoint', () => {
+    template.resourceCountIs('AWS::Lambda::WebFunction', 1);
+    template.hasResourceProperties('AWS::Lambda::WebFunctionEndpoint', { AuthType: 'IamAuth' });
+  });
+
+  test('signal Web Function: only this distribution may invoke the endpoint', () => {
+    template.hasResourceProperties('AWS::Lambda::ResourcePolicy', {
+      PolicyDocument: Match.objectLike({
+        Statement: [Match.objectLike({
+          Action: 'lambda:InvokeWebFunctionEndpoint',
+          Principal: { Service: 'cloudfront.amazonaws.com' },
+          Condition: { StringEquals: { 'aws:SourceArn': Match.anyValue() } },
+        })],
+      }),
+    });
+  });
+
+  test('signal origin uses a lambda OAC that always signs', () => {
+    template.hasResourceProperties('AWS::CloudFront::OriginAccessControl', {
+      OriginAccessControlConfig: Match.objectLike({
+        OriginAccessControlOriginType: 'lambda',
+        SigningBehavior: 'always-amz-auth',
+        SigningProtocol: 'sigv4',
+      }),
+    });
+  });
+
+  test('signal Web Function can send to the FIFO queue', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([Match.objectLike({
+          Action: Match.arrayWith(['sqs:SendMessage']),
+          Resource: { 'Fn::GetAtt': [Match.stringLikeRegexp('GenerationQueue'), 'Arn'] },
+        })]),
+      }),
+    });
   });
 
   test('creates CloudFront KeyValueStore', () => {
@@ -164,8 +250,10 @@ describe('MarkdownGenerationStack', () => {
         Runtime: 'nodejs24.x',
       },
     });
-    // Parser + Generator + KVS Sync = 3 functions (+ BucketDeployment custom resource handler)
-    expect(Object.keys(lambdas).length).toBeGreaterThanOrEqual(3);
+    // Generator + KVS Sync (+ CDK custom resource handlers); the Parser Lambda is gone
+    expect(Object.keys(lambdas).length).toBeGreaterThanOrEqual(2);
+    const handlers = Object.keys(lambdas).join(' ');
+    expect(handlers).not.toMatch(/Parser/);
   });
 
   test('Generator Lambda has required environment variables', () => {
@@ -178,6 +266,16 @@ describe('MarkdownGenerationStack', () => {
           FORMAT_TTL_SECONDS: '86400',
         }),
       },
+    });
+  });
+
+  test('KVS Sync Lambda no longer invalidates the cache', () => {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const kvsSync = Object.entries(policies).filter(([id]) => id.includes('KvsSync'));
+    expect(kvsSync.length).toBe(1);
+    expect(JSON.stringify(kvsSync[0][1])).not.toContain('cloudfront:CreateInvalidation');
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ KVS_ARN: Match.anyValue(), DISTRIBUTION_ID: Match.absent() }) },
     });
   });
 
@@ -197,15 +295,15 @@ describe('MarkdownGenerationStack', () => {
   });
 
   // --- Log Groups ---
-  test('creates CFF log groups for subscription filters', () => {
+  test('creates log groups for both CloudFront Functions (dashboard metric filters)', () => {
     template.resourcePropertiesCountIs('AWS::Logs::LogGroup', {
       LogGroupName: Match.stringLikeRegexp('/aws/cloudfront/function/'),
     }, 2);
   });
 
-  // --- Subscription Filters ---
-  test('creates subscription filters on CFF log groups', () => {
-    template.resourceCountIs('AWS::Logs::SubscriptionFilter', 2);
+  // --- No log-based signal path ---
+  test('signals travel by cf.beacon: no subscription filters', () => {
+    template.resourceCountIs('AWS::Logs::SubscriptionFilter', 0);
   });
 
   // --- Outputs ---
