@@ -235,9 +235,9 @@ export class OperationalDashboard extends Construct {
       }),
     );
 
-    // The signal Web Function publishes the standard AWS/Lambda metrics under its name
+    // A Web Function publishes its own metrics in AWS/Lambda/Web, by function name
     const signalMetric = (metricName: string, statistic: string, label: string) => new cloudwatch.Metric({
-      namespace: 'AWS/Lambda', metricName, statistic, label,
+      namespace: 'AWS/Lambda/Web', metricName, statistic, label,
       dimensionsMap: { FunctionName: props.signalFunction.webFunctionName },
     });
 
@@ -270,10 +270,11 @@ export class OperationalDashboard extends Construct {
         width: 8,
         height: 6,
         left: [
-          signalMetric('Invocations', 'Sum', 'Invocations'),
-          signalMetric('Errors', 'Sum', 'Errors'),
+          signalMetric('ExecutedRequests', 'Sum', 'Requests'),
+          signalMetric('HTTPResponseStatusClass4XX', 'Sum', '4xx (rejected signals)'),
+          signalMetric('HTTPResponseStatusClass5XX', 'Sum', '5xx'),
         ],
-        right: [signalMetric('Duration', 'Average', 'Duration (ms)')],
+        right: [signalMetric('EnvironmentConcurrentRequests', 'Maximum', 'Concurrent requests')],
       }),
     );
 
