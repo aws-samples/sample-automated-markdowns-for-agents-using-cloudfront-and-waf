@@ -1,0 +1,10 @@
+{
+  "name": "markdown-signal-origin",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.1005.0",
+    "fastify": "^5.12.8"
+  }
+}

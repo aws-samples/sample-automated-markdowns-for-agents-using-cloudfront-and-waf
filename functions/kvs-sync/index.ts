@@ -6,17 +6,14 @@ import {
 } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import '@aws-sdk/signature-v4a'; // Required for SigV4a signing used by CloudFront KVS
 import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { CloudFrontClient, CreateInvalidationCommand } from '@aws-sdk/client-cloudfront';
 import type { DynamoDBStreamEvent } from 'aws-lambda';
 import { logger } from '../shared/logger';
 import { ACTION_REWRITE } from '../../lib/constants';
 
 const kvsClient = new CloudFrontKeyValueStoreClient({});
 const s3Client = new S3Client({});
-const cfClient = new CloudFrontClient({});
 const KVS_ARN = process.env.KVS_ARN!;
 const FORMATS_BUCKET = process.env.FORMATS_BUCKET!;
-const DISTRIBUTION_ID = process.env.DISTRIBUTION_ID!;
 
 interface KvsMarker {
   action: string;
@@ -60,20 +57,6 @@ async function putKvsMarker(uri: string, marker: KvsMarker, etag: string): Promi
   logger.info('KvsPutSuccess', { uri });
 }
 
-async function invalidateCache(uri: string, path: string): Promise<void> {
-  await cfClient.send(new CreateInvalidationCommand({
-    DistributionId: DISTRIBUTION_ID,
-    InvalidationBatch: {
-      CallerReference: `kvs-sync-${uri}-${Date.now()}`,
-      Paths: {
-        Quantity: 1,
-        Items: [path],
-      },
-    },
-  }));
-  logger.info('CacheInvalidationCreated', { uri, path });
-}
-
 async function handleRemove(record: DynamoDBStreamEvent['Records'][number], etag: string): Promise<void> {
   const uri = record.dynamodb?.Keys?.uri?.S;
   if (!uri) return;
@@ -109,10 +92,8 @@ async function handleUpsert(record: DynamoDBStreamEvent['Records'][number], etag
 
   await putKvsMarker(uri, marker, etag);
 
-  // Invalidate stale failover-cached HTML so the new S3 format file is served
-  if (marker.path) {
-    await invalidateCache(uri, marker.path);
-  }
+  // No invalidation: the viewer-request function puts the marker's TTL in the cache key
+  // (x-format-version), so a new marker is a new cache entry at every edge.
 
   const requestedAt = newImage.requestedAt?.N ? parseInt(newImage.requestedAt.N, 10) : null;
   if (requestedAt) {

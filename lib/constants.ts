@@ -11,22 +11,30 @@ export const STACK_DESCRIPTION =
 export const DEFAULT_ROOT_OBJECT = 'index.html';
 export const CFF_NAME_MAX_LENGTH = 64;
 
-// Origin IDs — referenced by CFF viewer-request.js for dynamic origin groups
-export const FORMATS_ORIGIN_ID = 'formats-s3';
-export const FORMAT_MISSING_ORIGIN_ID = 'format-missing-distro';
+// Origin IDs — referenced by the CloudFront Functions (dynamic origin group, cf.beacon)
+export const CONTENT_ORIGIN_ID = 'content';
+/** One formats origin per format: `formats-<format>`, origin path `/formats/<format>` on the formats bucket. */
+export const FORMATS_ORIGIN_ID_PREFIX = 'formats-';
+/** The signal Web Function: an origin with no cache behavior, reached only by cf.beacon. */
+export const SIGNAL_ORIGIN_ID = 'signal';
+export const SIGNAL_PATH = '/signals';
 
 // Behavior path patterns
 export const STATIC_PATH_PATTERN = '/static/*';
-export const FORMATS_PATH_PATTERN = '/formats/*';
 
 // Internal header used by Generator Lambda to bypass CFF routing
 export const HEADER_SKIP_CONVERSION = 'x-internal-skip-conversion';
 
-// Origin secret header — restricts Format-Missing distro to Primary distro only
-export const ORIGIN_SECRET_HEADER = 'x-origin-verify';
+// Internal headers the viewer-request function sets (viewer-supplied copies are dropped)
+/** In the cache key: the marker's TTL, so a new marker is a new cache entry (no invalidation). */
+export const HEADER_FORMAT_VERSION = 'x-format-version';
+/** The format the request was routed to; the viewer-response function checks the answer against it. */
+export const HEADER_FORMAT_SERVED = 'x-format-served';
+/** served | queued | failed on the request; served | missing | queued | failed on the response. */
+export const HEADER_FORMAT_STATUS = 'x-format-status';
 
-// Origin-group failover
-export const ORIGIN_GROUP_FAILOVER_STATUS_CODES = [403];
+// Origin-group failover (the formats bucket answers 403 for a missing object: no s3:ListBucket)
+export const ORIGIN_GROUP_FAILOVER_STATUS_CODES = [403, 404];
 
 // --- AWS WAF ---
 export const WAF_ACL_METRIC_NAME = 'MarkdownBotControlAcl';
@@ -44,14 +52,11 @@ export const WAF_METRIC_FORMAT_CONVERT = 'FormatConvertDetected';
 export const WAF_RULE_DO_NOT_CONVERT = 'DoNotConvert';
 export const WAF_METRIC_DO_NOT_CONVERT = 'DoNotConvertRule';
 
-// AWS WAF for Format-Missing distro (origin-verify)
-export const WAF_FORMAT_MISSING_ACL_METRIC = 'FormatMissingOriginVerifyAcl';
-export const WAF_RULE_ORIGIN_VERIFY = 'OriginVerify';
-export const WAF_METRIC_ORIGIN_VERIFY = 'OriginVerifyRule';
-
 // --- Generation Pipeline ---
 export const DEFAULT_FORMAT = 'markdown';
 export const MARKDOWN_CONTENT_TYPE = 'text/markdown';
+/** Formats the edge can serve, and the content type each is stored with. */
+export const FORMAT_CONTENT_TYPES: Record<string, string> = { [DEFAULT_FORMAT]: MARKDOWN_CONTENT_TYPE };
 
 // AWS WAF-injected headers (AWS WAF auto-prefixes with 'x-amzn-waf-')
 export const WAF_HEADER_FORMAT_CONVERT = 'format-convert-needed';
@@ -74,7 +79,7 @@ export const SIGNAL_PASSTHROUGH = 'passthrough';
 export const FORMAT_TTL_SECONDS = 86400; // 24 hours
 export const GENERATOR_MEMORY_SIZE_MB = 512;
 export const GENERATOR_TIMEOUT_MINUTES = 2;
-export const PARSER_TIMEOUT_SECONDS = 30;
+export const SIGNAL_TIMEOUT_SECONDS = 10;
 export const KVS_SYNC_TIMEOUT_SECONDS = 30;
 export const QUEUE_VISIBILITY_TIMEOUT_MINUTES = 5;
 export const QUEUE_RETENTION_DAYS = 1;

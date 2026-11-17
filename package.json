@@ -8,7 +8,9 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
-    "test": "jest",
+    "postinstall": "npm ci --prefix functions/signal --no-audit --no-fund",
+    "test": "npm run check:functions && jest && node --test test/*.test.mjs",
+    "check:functions": "node scripts/check-no-for-of.mjs && node scripts/check-no-await-in-args.mjs && node scripts/check-no-optional-chaining-or-spread.mjs",
     "cdk": "cdk",
     "nag": "cdk synth && echo '\nNag report: cdk.out/AwsSolutions-MarkdownGenerationStack-NagReport.csv'"
   },

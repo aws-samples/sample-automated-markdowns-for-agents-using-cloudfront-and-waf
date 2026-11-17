@@ -3,6 +3,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as cdk from 'aws-cdk-lib/core';
+import { CONTENT_ORIGIN_ID } from '../constants';
 
 export class OriginLayer extends Construct {
   /** Sample content bucket (represents any customer origin) */
@@ -24,7 +25,10 @@ export class OriginLayer extends Construct {
       enforceSSL: true,
     });
 
-    this.contentOrigin = origins.S3BucketOrigin.withOriginAccessControl(this.contentBucket);
+    // The functions name it by origin id (the failover of the dynamic origin group)
+    this.contentOrigin = origins.S3BucketOrigin.withOriginAccessControl(this.contentBucket, {
+      originId: CONTENT_ORIGIN_ID,
+    });
 
     // Sample content deployment is done in the main stack (needs distribution reference for cache invalidation)
 

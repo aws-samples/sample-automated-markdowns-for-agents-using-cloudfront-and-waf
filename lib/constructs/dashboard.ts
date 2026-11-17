@@ -22,12 +22,13 @@ import {
 export interface DashboardProps {
   distribution: cloudfront.Distribution;
   webAcl: wafv2.CfnWebACL;
-  parserFunction: lambda.Function;
+  signalFunction: lambda.WebFunction;
   generatorFunction: lambdaNodejs.NodejsFunction;
   kvsSyncFunction: lambda.Function;
   queue: sqs.Queue;
   markersTable: dynamodb.Table;
-  primaryCffLogGroup: logs.LogGroup;
+  requestCffLogGroup: logs.LogGroup;
+  responseCffLogGroup: logs.LogGroup;
 }
 
 export class OperationalDashboard extends Construct {
@@ -41,7 +42,7 @@ export class OperationalDashboard extends Construct {
 
     // --- Metric Filters ---
     const formatServedFilter = new logs.MetricFilter(this, 'FormatServedFilter', {
-      logGroup: props.primaryCffLogGroup,
+      logGroup: props.requestCffLogGroup,
       filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_FORMAT_SERVED),
       metricNamespace: METRIC_NAMESPACE,
       metricName: 'FormatServed',
@@ -49,7 +50,7 @@ export class OperationalDashboard extends Construct {
     });
 
     const formatNeededFilter = new logs.MetricFilter(this, 'FormatNeededFilter', {
-      logGroup: props.primaryCffLogGroup,
+      logGroup: props.requestCffLogGroup,
       filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_FORMAT_NEEDED),
       metricNamespace: METRIC_NAMESPACE,
       metricName: 'FormatNeeded',
@@ -57,15 +58,16 @@ export class OperationalDashboard extends Construct {
     });
 
     const passthroughFilter = new logs.MetricFilter(this, 'PassthroughFilter', {
-      logGroup: props.primaryCffLogGroup,
+      logGroup: props.requestCffLogGroup,
       filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_PASSTHROUGH),
       metricNamespace: METRIC_NAMESPACE,
       metricName: 'Passthrough',
       metricValue: '1',
     });
 
+    // object_missing comes from the viewer-response function
     const objectMissingFilter = new logs.MetricFilter(this, 'ObjectMissingFilter', {
-      logGroup: props.primaryCffLogGroup,
+      logGroup: props.responseCffLogGroup,
       filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_OBJECT_MISSING),
       metricNamespace: METRIC_NAMESPACE,
       metricName: 'ObjectMissing',
@@ -233,7 +235,13 @@ export class OperationalDashboard extends Construct {
       }),
     );
 
-    // Pipeline row — SQS + Generator + Parser (even thirds)
+    // The signal Web Function publishes the standard AWS/Lambda metrics under its name
+    const signalMetric = (metricName: string, statistic: string, label: string) => new cloudwatch.Metric({
+      namespace: 'AWS/Lambda', metricName, statistic, label,
+      dimensionsMap: { FunctionName: props.signalFunction.webFunctionName },
+    });
+
+    // Pipeline row — SQS + Generator + Signal Web Function (even thirds)
     this.dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'SQS Queue Health',
@@ -258,14 +266,14 @@ export class OperationalDashboard extends Construct {
         right: [props.generatorFunction.metricDuration({ label: 'Duration (ms)' })],
       }),
       new cloudwatch.GraphWidget({
-        title: 'Parser Lambda',
+        title: 'Signal Web Function (cf.beacon target)',
         width: 8,
         height: 6,
         left: [
-          props.parserFunction.metricInvocations({ label: 'Invocations' }),
-          props.parserFunction.metricErrors({ label: 'Errors' }),
+          signalMetric('Invocations', 'Sum', 'Invocations'),
+          signalMetric('Errors', 'Sum', 'Errors'),
         ],
-        right: [props.parserFunction.metricDuration({ label: 'Duration (ms)' })],
+        right: [signalMetric('Duration', 'Average', 'Duration (ms)')],
       }),
     );
 
