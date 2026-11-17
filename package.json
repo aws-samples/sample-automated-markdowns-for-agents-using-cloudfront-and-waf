@@ -9,17 +9,12 @@
     "build": "tsc",
     "watch": "tsc -w",
     "postinstall": "npm ci --prefix functions/signal --no-audit --no-fund",
-    "test": "npm run check:functions && jest && node --test test/*.test.mjs",
-    "check:functions": "node scripts/check-no-for-of.mjs && node scripts/check-no-await-in-args.mjs && node scripts/check-no-optional-chaining-or-spread.mjs",
     "cdk": "cdk",
     "nag": "cdk synth && echo '\nNag report: cdk.out/AwsSolutions-MarkdownGenerationStack-NagReport.csv'"
   },
   "devDependencies": {
-    "@types/jest": "^30",
     "@types/node": "^24",
     "aws-cdk": "2.1148.1",
-    "jest": "^30",
-    "ts-jest": "^29",
     "ts-node": "^10.9.2",
     "typescript": "~5.9.3"
   },

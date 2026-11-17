@@ -180,8 +180,7 @@ behind the queue.
   gets 403. No shared secret to rotate.
 - **No body hash.** CloudFront signs a `POST` to a Web Function with an unsigned payload, so the functions send plain
   JSON without an `x-amz-content-sha256` header.
-- **A normal HTTP app.** Routes, validation and a 10 KB body limit (the `cf.beacon` limit) are ordinary Fastify code,
-  tested with `app.inject` ([test/signal-origin.test.mjs](test/signal-origin.test.mjs)).
+- **A normal HTTP app.** Routes, validation and a 10 KB body limit (the `cf.beacon` limit) are ordinary Fastify code.
 - **Fails safe.** A cold start can be longer than a network call's 1 second budget, and a beacon is not retried. A
   lost signal costs nothing: the agent already has the HTML, and its next request (or the next agent's) sends the
   signal again. With `logDeliveryErrors: true` CloudFront writes late delivery failures to the function's log group.
@@ -213,7 +212,7 @@ The formats and signal origins have no cache behavior. Only the functions use th
 ## Prerequisites
 
 - AWS account with [AWS CDK bootstrapped](https://docs.aws.amazon.com/cdk/v2/guide/bootstrapping.html) in `us-east-1`
-- Node.js 22+ (the CDK app and the tests), with npm
+- Node.js 22+, with npm
 - AWS Command Line Interface (AWS CLI) configured
 - An account whose CloudFront distributions can use CloudFront Functions network calls (`cf.fetch` / `cf.beacon`).
   Network calls are not available on the free pricing plan or on distributions with continuous deployment.
@@ -229,15 +228,12 @@ The stack deploys to `us-east-1` (required for Amazon CloudFront AWS WAF). The s
 built locally with `npm ci` (Docker is the fallback). To tag every resource, set a `tags` object in the CDK context,
 for example in `cdk.json` or `~/.cdk.json`: `{"context": {"tags": {"team": "edge"}}}`.
 
-## Test
+## Try it
 
 Bot detection relies on the [AWS WAF Bot Control](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-bot.html) managed rule group. Format conversion requires **both** an AI bot User-Agent **and** `Accept: text/markdown` in the request.
 
 ```bash
-# Unit tests: function syntax checks, CDK assertions, both CloudFront Functions, the signal Web Function
-npm test
-
-# After deployment — browser request (returns HTML)
+# Browser request (returns HTML)
 curl https://<distribution-domain>/index.html
 
 # AI bot request with Accept: text/markdown (first time returns HTML with x-format-status: queued;

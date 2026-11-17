@@ -12,7 +12,7 @@ import { Construct } from 'constructs';
 export interface WebFunctionOriginProps {
   /**
    * The origin's folder: an `index.js` that starts an HTTP server on port 3000 (each pattern uses a
-   * Fastify app), with its package.json dependencies. Deployed without `test/` and `node_modules/`;
+   * Fastify app), with its package.json dependencies. Deployed without `node_modules/`;
    * the bundle runs `npm ci` for the dependencies.
    */
   readonly codeDir: string;
@@ -95,14 +95,14 @@ class BoundWebFunctionOrigin extends origins.HttpOrigin {
   }
 }
 
-/** The package: the origin folder without tests and node_modules, with its dependencies installed. */
+/** The package: the origin folder without node_modules, with its dependencies installed. */
 function bundle(codeDir: string, outputDir: string): boolean {
   if (!fs.existsSync(path.join(codeDir, 'index.js'))) {
     throw new Error(`${codeDir}: a Web Function origin needs an index.js that starts the server on port 3000`);
   }
   fs.cpSync(codeDir, outputDir, {
     recursive: true,
-    filter: (src) => !/^(test|node_modules)([/\\]|$)/.test(path.relative(codeDir, src)),
+    filter: (src) => !/^node_modules([/\\]|$)/.test(path.relative(codeDir, src)),
   });
   const pkgPath = path.join(outputDir, 'package.json');
   const pkg = fs.existsSync(pkgPath) ? JSON.parse(fs.readFileSync(pkgPath, 'utf8')) : { name: 'origin', private: true };
