@@ -14,10 +14,10 @@ export class MarkdownGenerationStack extends cdk.Stack {
     // --- Origin Layer (customer's content + formats bucket) ---
     const originLayer = new OriginLayer(this, 'OriginLayer');
 
-    // --- Generation queue (the signal Web Function writes, the Generator reads) ---
+    // --- Generation queue (the signal API writes, the Generator reads) ---
     const generationQueue = new GenerationQueue(this, 'GenerationQueue');
 
-    // --- Edge Layer (CloudFront + WAF + CFF + KVS + signal Web Function) ---
+    // --- Edge Layer (CloudFront + WAF + CFF + KVS + signal API) ---
     const edgeLayer = new EdgeLayer(this, 'EdgeLayer', {
       contentOrigin: originLayer.contentOrigin,
       formatsBucket: originLayer.formatsBucket,
@@ -44,13 +44,12 @@ export class MarkdownGenerationStack extends cdk.Stack {
     new OperationalDashboard(this, 'OperationalDashboard', {
       distribution: edgeLayer.distribution,
       webAcl: edgeLayer.webAcl,
-      signalFunction: edgeLayer.signalFunction,
+      signalApi: edgeLayer.signalApi,
       generatorFunction: pipeline.generatorFunction,
       kvsSyncFunction: pipeline.kvsSyncFunction,
       queue: pipeline.queue,
       markersTable: pipeline.markersTable,
       requestCffLogGroup: edgeLayer.requestCffLogGroup,
-      responseCffLogGroup: edgeLayer.responseCffLogGroup,
     });
 
     // --- Stack Outputs ---

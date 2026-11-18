@@ -8,7 +8,6 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
-    "postinstall": "npm ci --prefix functions/signal --no-audit --no-fund",
     "cdk": "cdk",
     "nag": "cdk synth && echo '\nNag report: cdk.out/AwsSolutions-MarkdownGenerationStack-NagReport.csv'"
   },

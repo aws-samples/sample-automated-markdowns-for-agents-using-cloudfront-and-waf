@@ -1,8 +1,6 @@
 *.js
 # CloudFront Functions are authored directly in JavaScript (not compiled from TS)
 !functions/cloudfront/**/*.js
-# The signal Web Function is plain JavaScript too (bundled by npm ci, not compiled)
-!functions/signal/index.js
 *.d.ts
 node_modules
 cdk.out

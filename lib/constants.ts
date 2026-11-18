@@ -15,9 +15,13 @@ export const CFF_NAME_MAX_LENGTH = 64;
 export const CONTENT_ORIGIN_ID = 'content';
 /** One formats origin per format: `formats-<format>`, origin path `/formats/<format>` on the formats bucket. */
 export const FORMATS_ORIGIN_ID_PREFIX = 'formats-';
-/** The signal Web Function: an origin with no cache behavior, reached only by cf.beacon. */
+/** The signal API (API Gateway to SQS): an origin with no cache behavior, reached only by cf.beacon. */
 export const SIGNAL_ORIGIN_ID = 'signal';
+/** The signal API's stage, the origin path of the signal origin. */
+export const SIGNAL_STAGE_NAME = 'v1';
 export const SIGNAL_PATH = '/signals';
+/** SQS FIFO group and deduplication ids are at most 128 characters; both are the URI. */
+export const SIGNAL_MAX_URI_LENGTH = 128;
 
 // Behavior path patterns
 export const STATIC_PATH_PATTERN = '/static/*';
@@ -70,7 +74,8 @@ export const DO_NOT_CONVERT_PATTERNS = ['/static/.*'];
 // --- KVS Marker Actions ---
 export const ACTION_REWRITE = 'rewrite';
 
-// --- CFF Log Signals ---
+// --- Signals: format_needed and object_missing are the generation message's `source`;
+//     format_served and passthrough are DEBUG log lines the dashboard counts ---
 export const SIGNAL_FORMAT_SERVED = 'format_served';
 export const SIGNAL_FORMAT_NEEDED = 'format_needed';
 export const SIGNAL_OBJECT_MISSING = 'object_missing';
@@ -79,7 +84,6 @@ export const SIGNAL_PASSTHROUGH = 'passthrough';
 export const FORMAT_TTL_SECONDS = 86400; // 24 hours
 export const GENERATOR_MEMORY_SIZE_MB = 512;
 export const GENERATOR_TIMEOUT_MINUTES = 2;
-export const SIGNAL_TIMEOUT_SECONDS = 10;
 export const KVS_SYNC_TIMEOUT_SECONDS = 30;
 export const QUEUE_VISIBILITY_TIMEOUT_MINUTES = 5;
 export const QUEUE_RETENTION_DAYS = 1;

@@ -1,22 +1,18 @@
 import { Construct } from 'constructs';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cdk from 'aws-cdk-lib/core';
-import * as path from 'path';
 import { BotControlWaf, RoutingFunctions } from './edge';
 import { formatOriginIds } from './edge/routing-functions';
-import { WebFunctionOrigin } from './web-function-origin';
+import { SignalApi } from './signal-api';
 import {
   DEFAULT_ROOT_OBJECT,
   CONTENT_ORIGIN_ID,
-  FORMAT_CONTENT_TYPES,
-  SIGNAL_ORIGIN_ID,
-  SIGNAL_TIMEOUT_SECONDS,
   STATIC_PATH_PATTERN,
   HEADER_FORMAT_VERSION,
   WAF_HEADER_FORMAT_CONVERT,
@@ -27,7 +23,7 @@ export interface EdgeLayerProps {
   contentOrigin: cloudfront.IOrigin;
   /** S3 bucket for generated format outputs (markdown, etc.) */
   formatsBucket: s3.IBucket;
-  /** The generation queue the signal Web Function writes to */
+  /** The generation queue the signal API writes to */
   queue: sqs.IQueue;
 }
 
@@ -36,7 +32,7 @@ export class EdgeLayer extends Construct {
   public readonly kvsStore: cloudfront.KeyValueStore;
   public readonly requestCffLogGroup: logs.LogGroup;
   public readonly responseCffLogGroup: logs.LogGroup;
-  public readonly signalFunction: lambda.WebFunction;
+  public readonly signalApi: apigateway.RestApi;
   public readonly webAcl: wafv2.CfnWebACL;
 
   constructor(scope: Construct, id: string, props: EdgeLayerProps) {
@@ -52,18 +48,9 @@ export class EdgeLayer extends Construct {
     this.requestCffLogGroup = routingFunctions.requestCffLogGroup;
     this.responseCffLogGroup = routingFunctions.responseCffLogGroup;
 
-    // --- Signal origin: a Fastify Lambda Web Function the functions cf.beacon to ---
-    const signal = new WebFunctionOrigin(this, 'Signal', {
-      codeDir: path.join(__dirname, '../../functions/signal'),
-      originId: SIGNAL_ORIGIN_ID,
-      environment: {
-        QUEUE_URL: props.queue.queueUrl,
-        FORMATS: Object.keys(FORMAT_CONTENT_TYPES).join(','),
-      },
-      timeout: cdk.Duration.seconds(SIGNAL_TIMEOUT_SECONDS),
-    });
-    this.signalFunction = signal.webFunction;
-    props.queue.grantSendMessages(signal.webFunction);
+    // --- Signal origin: an API Gateway REST API that sends the functions' cf.beacon signals to SQS ---
+    const signal = new SignalApi(this, 'Signal', { queue: props.queue });
+    this.signalApi = signal.api;
 
     // --- Formats origins: one per format, origin path /formats/<format>, no cache behavior ---
     // The request function puts one in a dynamic origin group with the content origin as the
@@ -150,8 +137,8 @@ export class EdgeLayer extends Construct {
  * Add an origin that has no cache behavior (a target for a dynamic origin group or cf.beacon).
  *
  * The Distribution L2 only exposes origins through behaviors, so this calls its private
- * `addOrigin`, the same code path behaviors use, which also binds OAC origins (bucket policy,
- * Web Function resource policy) for this distribution. An origin already added by a behavior
+ * `addOrigin`, the same code path behaviors use, which also binds OAC origins (bucket policy)
+ * for this distribution. An origin already added by a behavior
  * is returned as is. Returns the origin id.
  */
 function addStandaloneOrigin(distribution: cloudfront.Distribution, origin: cloudfront.IOrigin): string {

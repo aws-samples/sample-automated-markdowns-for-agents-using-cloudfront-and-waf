@@ -4,7 +4,8 @@ import cf from 'cloudfront';
 // AWS WAF says whether the viewer is an AI agent that wants a format; KVS says whether that
 // format exists for this URI. A hit routes to the formats bucket, with the content origin as
 // the failover. A miss serves the original and cf.beacons a "format_needed" signal to the
-// signal Web Function, which queues the generation. The request never waits for the signal.
+// signal API (API Gateway, which sends it to SQS as the generation message). The request
+// never waits for the signal.
 
 // --- Constants (injected by CDK at synth time) ---
 const DEBUG = true;
@@ -27,23 +28,24 @@ const SIGNAL_FORMAT_NEEDED = '{{SIGNAL_FORMAT_NEEDED}}';
 // KVS handle — associated via CDK keyValueStore property
 const kvsHandle = cf.kvs();
 
-// The one network call this function makes, fire-and-forget. It throws only for a bad call
-// (or a distribution without network calls); a late delivery failure goes to CloudWatch Logs.
-function sendSignal(signal) {
+// The one network call this function makes, fire-and-forget. The body is the generation
+// message as the Generator reads it; CloudFront adds the API key as an origin custom header.
+// It throws only for a bad call (or a distribution without network calls); a late delivery
+// failure goes to CloudWatch Logs.
+function sendSignal(uri, format) {
   cf.beacon(SIGNAL_PATH, {
     originId: SIGNAL_ORIGIN_ID,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(signal),
+    body: JSON.stringify({ uri: uri, format: format, requestedAt: Date.now(), source: SIGNAL_FORMAT_NEEDED }),
     logDeliveryErrors: true,
   });
 }
 
-// Serve the original and ask for the format. The log line feeds the dashboard metrics.
-function formatNeeded(request, uri, format, expired) {
-  console.log(JSON.stringify({ signal: SIGNAL_FORMAT_NEEDED, uri: uri, format: format, expired: expired }));
+// Serve the original and ask for the format (a missing or an expired marker).
+function formatNeeded(request, uri, format) {
   try {
-    sendSignal({ signal: SIGNAL_FORMAT_NEEDED, uri: uri, format: format, expired: expired });
+    sendSignal(uri, format);
     request.headers[HEADER_FORMAT_STATUS] = { value: 'queued' };
   } catch (e) {
     // Fail open: the viewer still gets the original content.
@@ -94,7 +96,7 @@ async function handler(event) {
   }
 
   if (!marker || marker.action !== ACTION_REWRITE) {
-    return formatNeeded(request, uri, format, false);
+    return formatNeeded(request, uri, format);
   }
 
   const markerFormat = marker.format || format;
@@ -102,7 +104,7 @@ async function handler(event) {
   const now = Math.floor(Date.now() / 1000);
   if (!formatOriginId || !marker.ttl || marker.ttl <= now) {
     // Expired (or a format this edge cannot route) — serve original, signal re-generation
-    return formatNeeded(request, uri, markerFormat, true);
+    return formatNeeded(request, uri, markerFormat);
   }
 
   // 5. Valid marker. The URI stays as it is: the formats origin's origin path

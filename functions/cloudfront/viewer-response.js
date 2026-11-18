@@ -3,8 +3,9 @@ import cf from 'cloudfront';
 // Viewer-response function on the default behavior (runtime cloudfront-js-2.0).
 // When the request function routed to a format, the answer should be that format. If it is
 // not, the formats bucket had no object (a 403) and the origin group served the original
-// from the content origin. That is "object_missing": cf.beacon it to the signal Web Function,
-// which queues a regeneration. The viewer already has the original, so nothing waits.
+// from the content origin. That is "object_missing": cf.beacon it to the signal API
+// (API Gateway, which sends it to SQS), and the Generator regenerates the page. The viewer
+// already has the original, so nothing waits.
 // It also copies the x-format-status verdict onto the response.
 
 // --- Constants (injected by CDK at synth time) ---
@@ -33,13 +34,13 @@ async function handler(event) {
 
   // The original came back instead of the format.
   response.headers[HEADER_FORMAT_STATUS] = { value: 'missing' };
-  console.log(JSON.stringify({ signal: SIGNAL_OBJECT_MISSING, uri: request.uri, format: format }));
   try {
     cf.beacon(SIGNAL_PATH, {
       originId: SIGNAL_ORIGIN_ID,
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ signal: SIGNAL_OBJECT_MISSING, uri: request.uri, format: format }),
+      // The generation message as the Generator reads it
+      body: JSON.stringify({ uri: request.uri, format: format, requestedAt: Date.now(), source: SIGNAL_OBJECT_MISSING }),
       logDeliveryErrors: true,
     });
   } catch (e) {

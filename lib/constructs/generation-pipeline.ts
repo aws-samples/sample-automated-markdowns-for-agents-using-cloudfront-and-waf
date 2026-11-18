@@ -28,13 +28,13 @@ export interface GenerationPipelineProps {
   formatsBucket: s3.IBucket;
   distributionDomainName: string;
   kvsStore: cloudfront.KeyValueStore;
-  /** The FIFO queue the signal Web Function fills (see GenerationQueue) */
+  /** The FIFO queue the signal API fills (see GenerationQueue) */
   queue: sqs.Queue;
 }
 
 /**
  * The SQS FIFO queue between the edge and the generator. Created before the distribution:
- * the signal Web Function (an origin) writes to it, the Generator Lambda reads it.
+ * the signal API (an origin) writes to it, the Generator Lambda reads it.
  */
 export class GenerationQueue extends Construct {
   public readonly queue: sqs.Queue;
