@@ -3,7 +3,7 @@ import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import type { SQSEvent } from 'aws-lambda';
 import { converters, Converter, ConvertResult } from './converters';
 import { logger } from '../shared/logger';
-import { HEADER_SKIP_CONVERSION, ACTION_REWRITE } from '../../lib/constants';
+import { HEADER_SKIP_CONVERSION, ACTION_REWRITE, DEFAULT_ROOT_OBJECT } from '../../lib/constants';
 
 const s3 = new S3Client({});
 const ddb = new DynamoDBClient({});
@@ -39,7 +39,10 @@ async function storeConvertedContent(
   result: ConvertResult,
   converter: Converter,
 ): Promise<string> {
-  const formatKey = `formats/${format}${uri}`;
+  // The formats origin has origin path /formats/<format>, and CloudFront asks it for the
+  // default root object when the viewer asks for "/".
+  const objectPath = uri === '/' ? `/${DEFAULT_ROOT_OBJECT}` : uri;
+  const formatKey = `formats/${format}${objectPath}`;
   await s3.send(new PutObjectCommand({
     Bucket: BUCKET_NAME,
     Key: formatKey,

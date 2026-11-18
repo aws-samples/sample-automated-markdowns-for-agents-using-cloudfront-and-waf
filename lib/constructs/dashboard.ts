@@ -1,5 +1,6 @@
 import { Construct } from 'constructs';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -12,8 +13,6 @@ import {
   WAF_METRIC_FORMAT_CONVERT,
   WAF_METRIC_DO_NOT_CONVERT,
   SIGNAL_FORMAT_SERVED,
-  SIGNAL_FORMAT_NEEDED,
-  SIGNAL_OBJECT_MISSING,
   SIGNAL_PASSTHROUGH,
   METRIC_NAMESPACE,
   DASHBOARD_NAME,
@@ -22,12 +21,13 @@ import {
 export interface DashboardProps {
   distribution: cloudfront.Distribution;
   webAcl: wafv2.CfnWebACL;
-  parserFunction: lambda.Function;
+  signalApi: apigateway.RestApi;
   generatorFunction: lambdaNodejs.NodejsFunction;
   kvsSyncFunction: lambda.Function;
   queue: sqs.Queue;
   markersTable: dynamodb.Table;
-  primaryCffLogGroup: logs.LogGroup;
+  /** The viewer-request function's log group: its DEBUG lines (format_served, passthrough) */
+  requestCffLogGroup: logs.LogGroup;
 }
 
 export class OperationalDashboard extends Construct {
@@ -41,34 +41,18 @@ export class OperationalDashboard extends Construct {
 
     // --- Metric Filters ---
     const formatServedFilter = new logs.MetricFilter(this, 'FormatServedFilter', {
-      logGroup: props.primaryCffLogGroup,
+      logGroup: props.requestCffLogGroup,
       filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_FORMAT_SERVED),
       metricNamespace: METRIC_NAMESPACE,
       metricName: 'FormatServed',
       metricValue: '1',
     });
 
-    const formatNeededFilter = new logs.MetricFilter(this, 'FormatNeededFilter', {
-      logGroup: props.primaryCffLogGroup,
-      filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_FORMAT_NEEDED),
-      metricNamespace: METRIC_NAMESPACE,
-      metricName: 'FormatNeeded',
-      metricValue: '1',
-    });
-
     const passthroughFilter = new logs.MetricFilter(this, 'PassthroughFilter', {
-      logGroup: props.primaryCffLogGroup,
+      logGroup: props.requestCffLogGroup,
       filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_PASSTHROUGH),
       metricNamespace: METRIC_NAMESPACE,
       metricName: 'Passthrough',
-      metricValue: '1',
-    });
-
-    const objectMissingFilter = new logs.MetricFilter(this, 'ObjectMissingFilter', {
-      logGroup: props.primaryCffLogGroup,
-      filterPattern: logs.FilterPattern.stringValue('$.signal', '=', SIGNAL_OBJECT_MISSING),
-      metricNamespace: METRIC_NAMESPACE,
-      metricName: 'ObjectMissing',
       metricValue: '1',
     });
 
@@ -91,8 +75,9 @@ export class OperationalDashboard extends Construct {
 
     // --- Reusable metrics ---
     const formatServed = formatServedFilter.metric({ statistic: 'Sum', label: 'Format Served' });
-    const formatNeeded = formatNeededFilter.metric({ statistic: 'Sum', label: 'Format Needed' });
-    const objectMissing = objectMissingFilter.metric({ statistic: 'Sum', label: 'Object Missing' });
+    // Signals: what the functions beaconed (the API's requests) and what reached the queue
+    const signalsSent = props.signalApi.metricCount({ statistic: 'Sum', label: 'Signals (API requests)' });
+    const messagesQueued = props.queue.metricNumberOfMessagesSent({ statistic: 'Sum', label: 'Queued (SQS messages sent)' });
     const passthrough = passthroughFilter.metric({ statistic: 'Sum', label: 'Passthrough' });
 
     const formatConvert = new cloudwatch.Metric({
@@ -124,8 +109,9 @@ export class OperationalDashboard extends Construct {
         width: 6,
         height: 4,
         metrics: [new cloudwatch.MathExpression({
-          expression: 'IF(s+n+m > 0, s/(s+n+m)*100, 0)',
-          usingMetrics: { s: formatServed, n: formatNeeded, m: objectMissing },
+          // Agent requests the format was served to, of all the requests AWS WAF marked for a format
+          expression: 'IF(b > 0, s/b*100, 0)',
+          usingMetrics: { s: formatServed, b: formatConvert },
           label: '%',
         })],
       }),
@@ -169,7 +155,7 @@ export class OperationalDashboard extends Construct {
         width: 12,
         height: 8,
         stacked: true,
-        left: [formatConvert, formatServed, formatNeeded, objectMissing],
+        left: [formatConvert, formatServed, signalsSent, messagesQueued],
       }),
       new cloudwatch.GraphWidget({
         title: 'Total vs Format Conversion Traffic',
@@ -233,7 +219,7 @@ export class OperationalDashboard extends Construct {
       }),
     );
 
-    // Pipeline row — SQS + Generator + Parser (even thirds)
+    // Pipeline row — SQS + Generator + signal API (even thirds)
     this.dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'SQS Queue Health',
@@ -258,14 +244,15 @@ export class OperationalDashboard extends Construct {
         right: [props.generatorFunction.metricDuration({ label: 'Duration (ms)' })],
       }),
       new cloudwatch.GraphWidget({
-        title: 'Parser Lambda',
+        title: 'Signal API (cf.beacon target) and queue',
         width: 8,
         height: 6,
         left: [
-          props.parserFunction.metricInvocations({ label: 'Invocations' }),
-          props.parserFunction.metricErrors({ label: 'Errors' }),
+          signalsSent,
+          props.signalApi.metricClientError({ statistic: 'Sum', label: '4xx (rejected signals)' }),
+          props.signalApi.metricServerError({ statistic: 'Sum', label: '5xx' }),
         ],
-        right: [props.parserFunction.metricDuration({ label: 'Duration (ms)' })],
+        right: [messagesQueued],
       }),
     );
 

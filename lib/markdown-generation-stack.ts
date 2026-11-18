@@ -4,7 +4,7 @@ import * as path from 'path';
 import { Construct } from 'constructs';
 import { OriginLayer } from './constructs/origin-layer';
 import { EdgeLayer } from './constructs/edge-layer';
-import { GenerationPipeline } from './constructs/generation-pipeline';
+import { GenerationPipeline, GenerationQueue } from './constructs/generation-pipeline';
 import { OperationalDashboard } from './constructs/dashboard';
 
 export class MarkdownGenerationStack extends cdk.Stack {
@@ -14,20 +14,22 @@ export class MarkdownGenerationStack extends cdk.Stack {
     // --- Origin Layer (customer's content + formats bucket) ---
     const originLayer = new OriginLayer(this, 'OriginLayer');
 
-    // --- Edge Layer (CloudFront + WAF + CFF + KVS) ---
+    // --- Generation queue (the signal API writes, the Generator reads) ---
+    const generationQueue = new GenerationQueue(this, 'GenerationQueue');
+
+    // --- Edge Layer (CloudFront + WAF + CFF + KVS + signal API) ---
     const edgeLayer = new EdgeLayer(this, 'EdgeLayer', {
       contentOrigin: originLayer.contentOrigin,
       formatsBucket: originLayer.formatsBucket,
+      queue: generationQueue.queue,
     });
 
-    // --- Generation Pipeline (CW Logs → Parser → SQS → Generator → S3 + DDB → KVS) ---
+    // --- Generation Pipeline (SQS → Generator → S3 + DDB → KVS) ---
     const pipeline = new GenerationPipeline(this, 'GenerationPipeline', {
       formatsBucket: originLayer.formatsBucket,
       distributionDomainName: edgeLayer.distribution.distributionDomainName,
-      distributionId: edgeLayer.distribution.distributionId,
       kvsStore: edgeLayer.kvsStore,
-      primaryCffLogGroup: edgeLayer.primaryCffLogGroup,
-      failoverCffLogGroup: edgeLayer.failoverCffLogGroup,
+      queue: generationQueue.queue,
     });
 
     // --- Deploy sample content with CloudFront cache invalidation ---
@@ -42,12 +44,12 @@ export class MarkdownGenerationStack extends cdk.Stack {
     new OperationalDashboard(this, 'OperationalDashboard', {
       distribution: edgeLayer.distribution,
       webAcl: edgeLayer.webAcl,
-      parserFunction: pipeline.parserFunction,
+      signalApi: edgeLayer.signalApi,
       generatorFunction: pipeline.generatorFunction,
       kvsSyncFunction: pipeline.kvsSyncFunction,
       queue: pipeline.queue,
       markersTable: pipeline.markersTable,
-      primaryCffLogGroup: edgeLayer.primaryCffLogGroup,
+      requestCffLogGroup: edgeLayer.requestCffLogGroup,
     });
 
     // --- Stack Outputs ---

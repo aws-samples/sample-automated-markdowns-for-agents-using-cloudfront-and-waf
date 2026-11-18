@@ -1,5 +1,4 @@
 *.js
-!jest.config.js
 # CloudFront Functions are authored directly in JavaScript (not compiled from TS)
 !functions/cloudfront/**/*.js
 *.d.ts
